@@ -54,3 +54,124 @@ dirichlet_tags = ["top_bottom", "wellbore"]
 #####################################
 ######## ADD YOU CODE HERE ##########
 #####################################
+# -------------------------------------------------------------------------
+# OUTPUT AND MESH SETUP
+# -------------------------------------------------------------------------
+output_dir = "results"
+if !isdir(output_dir)
+    mkdir(output_dir)
+end
+
+# Load the wellbore mesh
+model = GmshDiscreteModel("wellbore.msh")
+
+# Debug: print boundary entity tags
+labels = get_face_labeling(model)
+println("Entities tagged as top_bottom: ", findall(labels.tag_to_name .== "top_bottom"))
+println("Entities tagged as wellbore: ",   findall(labels.tag_to_name .== "wellbore"))
+
+# -------------------------------------------------------------------------
+# DOMAIN AND INTEGRATION SETUP
+# -------------------------------------------------------------------------
+Ω = Triangulation(model)
+dΩ = Measure(Ω, 2)            # 2nd order quadrature
+gΓ = BoundaryTriangulation(model)
+dΓ = Measure(gΓ, 2)
+
+# -------------------------------------------------------------------------
+# FINITE ELEMENT SPACES
+# -------------------------------------------------------------------------
+order_u = 2  # P2 for displacement
+order_p = 1  # P1 for pressure
+
+reffe_u = ReferenceFE(lagrangian, VectorValue{2,Float64}, order_u)
+reffe_p = ReferenceFE(lagrangian, Float64, order_p)
+
+# Displacement test/trial spaces with Dirichlet BC on top_bottom
+δu = TestFESpace(model, reffe_u, conformity=:H1, dirichlet_tags=["top_bottom"])
+u_trial = TrialFESpace(δu, x -> VectorValue(0.0, 0.0))
+
+# Pressure test/trial spaces with Dirichlet BC on wellbore (constant Pb)
+δp = TestFESpace(model, reffe_p, conformity=:H1, dirichlet_tags=["wellbore"])
+p_trial = TrialFESpace(δp, x -> Pb)
+
+# Combine into multi-field spaces
+Y = MultiFieldFESpace([δu, δp])
+
+# -------------------------------------------------------------------------
+# CONSTITUTIVE RELATIONS
+# -------------------------------------------------------------------------
+function sigma(u)
+    ε = symmetric_gradient(u)
+    I = TensorValue(1.0,0.0,0.0,1.0)
+    return lambda * tr(ε) * I + 2 * mu * ε
+end
+
+function sigma_zz(u)
+    ε = symmetric_gradient(u)
+    return lambda * tr(ε)
+end
+
+# -------------------------------------------------------------------------
+# INITIAL CONDITIONS
+# -------------------------------------------------------------------------
+u0 = VectorValue(0.0, 0.0)
+p0_val = p0
+
+# -------------------------------------------------------------------------
+# TRANSIENT SPACES
+# -------------------------------------------------------------------------
+u_t = TransientTrialFESpace(δu)
+p_t = TransientTrialFESpace(δp)
+X_t = MultiFieldFESpace([u_t, p_t])
+
+# -------------------------------------------------------------------------
+# WEAK FORMULATION
+# -------------------------------------------------------------------------
+a(t, (u,p), (δu, δp)) = ∫(
+    symmetric_gradient(δu) ⊙ sigma(u) -                           # Solid mechanics
+    (B * divergence(δu) * p) +                                   # Biot coupling (solid<-fluid)
+    δp * (1/M) * ∂t(p) +                                          # Storage
+    ∇(δp) ⋅ (k_mu * ∇(p)) +                                       # Darcy flow
+    δp * B * divergence(∂t(u))                                   # Biot coupling (fluid<-solid)
+) * dΩ
+
+l(t, (δu, δp)) = ∫(   # No external tractions on wellbore beyond Dirichlet p
+    zero(δu)                                                      # zero to fill signature
+) * boundary(dΓ)
+
+res(t, up, tup) = a(t, up, tup) - l(t, tup)
+
+# -------------------------------------------------------------------------
+# SOLVER SETUP
+# -------------------------------------------------------------------------
+op = TransientFEOperator(res, X_t, Y)
+ls = LUSolver()
+nls = NLSolver(ls, method=:newton, iterations=10, show_trace=false)
+θ = 1.0                      # Backward Euler
+ode_solver = ThetaMethod(nls, dt, θ)
+
+# -------------------------------------------------------------------------
+# INITIAL SOLUTION
+# -------------------------------------------------------------------------
+uh0 = interpolate_everywhere([u0, p0_val], X_t(0.0))
+
+# -------------------------------------------------------------------------
+# TIME MARCHING AND OUTPUT
+# -------------------------------------------------------------------------
+sol = solve(ode_solver, op, 0.0, T, uh0)
+
+createpvd(joinpath(output_dir, "results")) do pvd
+    # initial
+    disp0, pres0 = uh0\    
+    pvd[0.0] = createvtk(Ω, joinpath(output_dir, "results_0.vtu"),
+                         cellfields=["displacement"=>disp0, "pressure"=>pres0])
+    for (tn, uhn) in sol
+        println("Writing results at t = $tn")
+        disp_n, pres_n = uhn
+        pvd[tn] = createvtk(Ω, joinpath(output_dir, "results_$(tn).vtu"),
+                            cellfields=["displacement"=>disp_n, "pressure"=>pres_n])
+    end
+end
+
+println("Wellbore poroelastic simulation completed! Results in '$output_dir'.")
