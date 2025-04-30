@@ -98,12 +98,12 @@ end
 # TRANSIENT TRIAL SPACES & INITIAL CONDITIONS
 # ============================================================================
 u0 = VectorValue(0.0, 0.0)
-p0 = p0
+p0_val = 20.0e6  # initial pore pressure (Pa)  # corrected distinct variable
 
 u_t       = TransientTrialFESpace(δu)  # uses u trial for BCs
 p_t       = TransientTrialFESpace(δp)  # uses p trial for BCs
 X_t       = MultiFieldFESpace([u_t, p_t])
-uh0       = interpolate_everywhere([u0, p0], X_t(0.0))  # initial solution
+uh0 = interpolate_everywhere([u0, p0_val], X_t(0.0))  # initial condition with correct pressure)  # initial solution
 
 # ============================================================================
 # WEAK FORMULATION
