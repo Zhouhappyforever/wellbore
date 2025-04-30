@@ -27,7 +27,7 @@ k         = 1.0e-3     # Permeability (m^2)
 mu_f      = 1.0e-3     # Fluid viscosity (Pa·s)
 
 Pb        = 31.5e6     # Wellbore pressure (Pa)
-p0        = 20.0e6     # Initial pore pressure (Pa)
+p0_val    = 20.0e6     # Initial pore pressure (Pa)
 
 T         = 0.0005     # Final time (s)
 num_steps = 100        # Number of time steps
@@ -70,16 +70,32 @@ order_p    = 1  # linear pressure
 reffe_u    = ReferenceFE(lagrangian, VectorValue{2,Float64}, order_u)
 reffe_p    = ReferenceFE(lagrangian, Float64, order_p)
 
-# Test spaces with Dirichlet tags
-δu         = TestFESpace(model, reffe_u, conformity=:H1, dirichlet_tags=["top_bottom"])
-δp         = TestFESpace(model, reffe_p, conformity=:H1, dirichlet_tags=["wellbore"])
+# Displacement BC: zero on top_bottom
+delta_u    = TestFESpace(model, reffe_u, conformity=:H1, dirichlet_tags=["top_bottom"])
+u_trial   = TrialFESpace(delta_u, x->VectorValue(0.0,0.0))
 
-# Trial spaces to enforce Dirichlet BCs
-u          = TrialFESpace(δu, x -> VectorValue(0.0, 0.0))  # u_x=u_y=0 on top_bottom
-p          = TrialFESpace(δp, x -> Pb)                     # p=Pb on wellbore
+# Pressure BC: Pb on wellbore
+delta_p    = TestFESpace(model, reffe_p, conformity=:H1, dirichlet_tags=["wellbore"])
+p_trial    = TrialFESpace(delta_p, x->Pb)
 
-# Combine into multi-field spaces
-Y          = MultiFieldFESpace([δu, δp])  # Test space
+# Combined multi-field test space
+Y          = MultiFieldFESpace([delta_u, delta_p])
+
+# ============================================================================
+# INITIAL & TRANSIENT SPACES
+# ============================================================================
+# Define initial condition fields
+u0         = VectorValue(0.0, 0.0)
+p0         = p0_val
+
+# Transient trial spaces (Dirichlet enforced via trial spaces above)
+u_t       = TransientTrialFESpace(delta_u)
+p_t       = TransientTrialFESpace(delta_p)
+X_t        = MultiFieldFESpace([u_t, p_t])
+
+# Interpolate initial solution
+uh0 = interpolate_everywhere([u0, p0], X_t(0.0))  # corrected variable name for initial solution
+ih0 = interpolate_everywhere([u0, p0], X_t(0.0))
 
 # ============================================================================
 # CONSTITUTIVE RELATIONS
@@ -95,41 +111,30 @@ function sigma_zz(u)
 end
 
 # ============================================================================
-# TRANSIENT TRIAL SPACES & INITIAL CONDITIONS
-# ============================================================================
-u0 = VectorValue(0.0, 0.0)
-p0_val = 20.0e6  # initial pore pressure (Pa)  # corrected distinct variable
-
-u_t       = TransientTrialFESpace(δu)  # uses u trial for BCs
-p_t       = TransientTrialFESpace(δp)  # uses p trial for BCs
-X_t       = MultiFieldFESpace([u_t, p_t])
-uh0 = interpolate_everywhere([u0, p0_val], X_t(0.0))  # initial condition with correct pressure)  # initial solution
-
-# ============================================================================
 # WEAK FORMULATION
 # ============================================================================
-a(t, (u, p), (δu, δp)) = ∫(
-  symmetric_gradient(δu) ⊙ sigma(u) -   # solid mechanics
-  B * divergence(δu) * p +               # Biot coupling (solid <- fluid)
-  δp * (1/M) * ∂t(p) +                   # fluid storage
-  ∇(δp) ⋅ (k_mu * ∇(p)) +                # Darcy flow
-  δp * B * divergence(∂t(u))            # Biot coupling (fluid <- solid)
+a(t, (u,p), (δu,δp)) = ∫(
+  symmetric_gradient(δu) ⊙ sigma(u) -      # solid mechanics
+  B * divergence(δu) * p +                  # Biot coupling
+  δp * (1/M) * ∂t(p) +                      # storage term
+  ∇(δp) ⋅ (k_mu * ∇(p)) +                   # Darcy flow
+  δp * B * divergence(∂t(u))                # coupling term
 ) * dΩ
 
-l(t, (δu, δp)) = ∫(                         # zero Neumann traction
-  δu ⋅ VectorValue(0.0, 0.0)
+l(t, (δu,δp)) = ∫(
+  δu ⋅ VectorValue(0.0,0.0)                  # zero Neumann on all boundaries
 ) * dΓb
 
-res(t, up, tup) = a(t, up, tup) - l(t, tup)
+res(t,(u,p),(δu,δp)) = a(t,(u,p),(δu,δp)) - l(t,(δu,δp))
 
 # ============================================================================
-# TRANSIENT PROBLEM SETUP & SOLVER
+# SOLVER SETUP
 # ============================================================================
-op          = TransientFEOperator(res, X_t, Y)
-ls          = LUSolver()  # direct solver
-nls         = NLSolver(ls, method=:newton, iterations=10, show_trace=false)
-theta       = 1.0         # backward Euler
-ode_solver = ThetaMethod(nls, dt, theta)
+op         = TransientFEOperator(res, X_t, Y)
+ls         = LUSolver()
+nls        = NLSolver(ls, method=:newton, iterations=10, show_trace=false)
+theta      = 1.0  # backward Euler
+ode_solver= ThetaMethod(nls, dt, theta)
 
 # ============================================================================
 # TIME MARCHING & OUTPUT
@@ -139,15 +144,14 @@ createpvd(joinpath(output_dir, "results")) do pvd
   # initial state
   disp0, pres0 = uh0
   pvd[0.0] = createvtk(Ω, joinpath(output_dir, "results_0.vtu"),
-                         cellfields=["displacement"=>disp0,
-                                     "pressure"    =>pres0])
-  # time steps
-  for (i, (tn, uhn)) in enumerate(sol)
+                       cellfields=["displacement"=>disp0, "pressure"=>pres0])
+
+  # subsequent time steps
+  for (i,(tn,uhn)) in enumerate(sol)
     println("Writing results at t = $tn")
-    disp_n, pres_n = uhn
-    pvd[tn]     = createvtk(Ω, joinpath(output_dir, "results_$(i).vtu"),
-                             cellfields=["displacement"=>disp_n,
-                                         "pressure"    =>pres_n])
+    disp_n,pres_n = uhn
+    pvd[tn] = createvtk(Ω, joinpath(output_dir, "results_$(i).vtu"),
+                         cellfields=["displacement"=>disp_n, "pressure"=>pres_n])
   end
 end
 
