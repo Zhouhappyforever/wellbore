@@ -154,7 +154,7 @@ function sigma_zz(u)
     # In plane strain: σzz = λ(εxx + εyy) = λ·tr(ε)
     # This is derived from the 3D constitutive equation with εzz = 0
     return lambda * tr(ε)
-end
+enda
 
 # ============================================================================
 # INITIAL CONDITIONS
