@@ -38,7 +38,7 @@ p0 = 20.0e6
 
 # Time stepping parameters
 T = 0.0005          # Final time (s)
-num_steps = 3   # Number of time steps
+num_steps = 100   # Number of time steps
 dt = T / num_steps # Time step size (s)
 
 # ============================================================================
@@ -167,7 +167,7 @@ end
 # ============================================================================
 # Define initial conditions for the problem
 u0 = VectorValue(0.0, 0.0)  # Zero initial displacement
-p0 = 0.0                    # Zero initial pressure
+p0 = p0                    # Zero initial pressure
 
 # ============================================================================
 # TRANSIENT TRIAL SPACES
@@ -204,7 +204,6 @@ a(t, (u,p), (δu,δp)) = ∫(
 ) * dΩ
 
 # Linear form l(δu,δp) - represents external forces/sources
-using Gridap.Geometry: get_normal_vector
 
 n_Γ = get_normal_vector(Γ_wb)         # Unit normal getter :contentReference[oaicite:3]{index=3}
 l(t, (δu, δp)) = ∫( δu ⋅ ( - Pb * n_Γ ) ) * dΓ_wb  # Traction via normal :contentReference[oaicite:4]{index=4}
