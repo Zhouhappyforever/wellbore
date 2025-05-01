@@ -175,8 +175,11 @@ p0 = p0                    # Zero initial pressure
 # Create transient trial spaces for time-dependent problem
 # For this problem, our boundary conditions don't change with time,
 # but we still need to use TransientTrialFESpace for the time integration
-u_t = TransientTrialFESpace(δu)  # Transient displacement space
-p_t = TransientTrialFESpace(δp)  # Transient pressure space
+u_bc(t) = x -> VectorValue(0.0, 0.0)   # zero displacement at top_bottom
+p_bc(t) = x -> Pb                      # wellbore pressure at all times
+# now each step re-imposes u=0 and p=Pb where you’ve tagged them
+u_t = TransientTrialFESpace(δu, u_bc)    # enforce u=0 at top_bottom each step
+p_t = TransientTrialFESpace(δp, p_bc)    # enforce p=Pb at wellbore each step :contentReference[oaicite:2]{index=2}
 
 # Combine the transient spaces into a multi-field space
 X_t = MultiFieldFESpace([u_t, p_t])
