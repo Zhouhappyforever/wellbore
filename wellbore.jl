@@ -33,13 +33,25 @@ k = 1.0e-3        # Permeability (m^2) - how easily fluid flows through the medi
 mu = 1.0e-3       # Fluid viscosity (Pa·s)
 
 # Loading conditions
-Pb = 31.5e6
+Pb = 30.5e6
 p0 = 20.0e6
 
 # Time stepping parameters
 T = 0.0005          # Final time (s)
-num_steps = 100   # Number of time steps
+num_steps = 3   # Number of time steps
 dt = T / num_steps # Time step size (s)
+
+# ============================================================================
+# DERIVED MATERIAL PROPERTIES
+# ============================================================================
+# Calculate Lamé parameters for plane strain formulation
+# For plane strain, we use the same Lamé parameters as in 3D
+lambda = E * nu / ((1 + nu) * (1 - 2 * nu))  # First Lamé parameter (Pa)
+mu = E / (2 * (1 + nu))                      # Second Lamé parameter (shear modulus) (Pa)
+k_mu = k / mu                                # Hydraulic conductivity (permeability/viscosity)
+
+dirichlet_tags = ["top_bottom", "wellbore"]
+
 
 # ============================================================================
 # DERIVED MATERIAL PROPERTIES
@@ -66,14 +78,11 @@ end
 
 # Load the Gmsh mesh from file
 # The mesh should be a square domain with properly tagged boundaries
-model = GmshDiscreteModel("wellbore.msh")
+model = GmshDiscreteModel("square.msh")
 
 # Define boundary tags for applying boundary conditions
 # These tags should match the physical groups defined in the Gmsh file
-dirichlet_tags = ["top_bottom", "wellbore"]
-#####################################
-######## ADD YOU CODE HERE ##########
-#####################################
+dirichlet_tags = ["top", "bottom", "left", "right"]
 
 # Export the mesh for visualization
 writevtk(model, "model")  # Save model for visualization in ParaView
@@ -111,23 +120,23 @@ reffe_p = ReferenceFE(lagrangian, Float64, order_p)                 # Scalar-val
 # ============================================================================
 # BOUNDARY CONDITIONS
 # ============================================================================
-# Displacement space with Dirichlet BC on bottom (fixed in y-direction)
-δu = TestFESpace(model, reffe_u, conformity=:H1, 
-                 dirichlet_tags=["top_bottom"])
-u = TrialFESpace(δu, x -> VectorValue(0.0, 0.0))  # Zero displacement at bottom boundary
+# Displacement: fix both uₓ and uᵧ on 'top_bottom'
+δu = TestFESpace(model, reffe_u; conformity=:H1,
+                 dirichlet_tags=["top", "bottom"])
+u_trial = TrialFESpace(δu, x -> VectorValue(0.0, 0.0))  # zero disp.
 
-# Pressure space with Dirichlet BC on left and right sides (drained boundaries)
-g_lr(x) = p0                                              # left/right BC function
-g_wb(x) = Pb                                              # wellbore BC function
-δp = TestFESpace(model, reffe_p, conformity=:H1, dirichlet_tags=["wellbore"])
-p  = TrialFESpace(δp, x -> Pb)                 # note order matches tags :contentReference[oaicite:1]{index=1}
+# Pressure: prescribe p = Pb on 'wellbore'
+δp = TestFESpace(model, reffe_p; conformity=:H1,
+                 dirichlet_tags=["left"])
+p_trial = TrialFESpace(δp, x -> Pb)  # constant pore‐pressure at wellbore
 
-# Create multi-field space for the coupled problem
-Y = MultiFieldFESpace([δu, δp])  # Combined test space for displacement and pressure
+# Combined test space
+Y = MultiFieldFESpace([δu, δp])
 
-# Create a boundary triangulation and measure for the wellbore
-Γ_wb  = BoundaryTriangulation(model, tags = "wellbore")
-dΓ_wb = Measure(Γ_wb, degree)
+# Boundary measure for the wellbore (Neumann traction)
+Γ_wellbore = BoundaryTriangulation(model, tags="left")
+dΓ_wellbore = Measure(Γ_wellbore, degree)
+
 
 
 # ============================================================================
@@ -167,7 +176,7 @@ end
 # ============================================================================
 # Define initial conditions for the problem
 u0 = VectorValue(0.0, 0.0)  # Zero initial displacement
-p0 = p0                    # Zero initial pressure
+p0 = 20e6                    
 
 # ============================================================================
 # TRANSIENT TRIAL SPACES
@@ -175,11 +184,8 @@ p0 = p0                    # Zero initial pressure
 # Create transient trial spaces for time-dependent problem
 # For this problem, our boundary conditions don't change with time,
 # but we still need to use TransientTrialFESpace for the time integration
-u_bc(t) = x -> VectorValue(0.0, 0.0)   # zero displacement at top_bottom
-p_bc(t) = x -> Pb                      # wellbore pressure at all times
-# now each step re-imposes u=0 and p=Pb where you’ve tagged them
-u_t = TransientTrialFESpace(δu, u_bc)    # enforce u=0 at top_bottom each step
-p_t = TransientTrialFESpace(δp, p_bc)    # enforce p=Pb at wellbore each step :contentReference[oaicite:2]{index=2}
+u_t = TransientTrialFESpace(δu)  # Transient displacement space
+p_t = TransientTrialFESpace(δp)  # Transient pressure space
 
 # Combine the transient spaces into a multi-field space
 X_t = MultiFieldFESpace([u_t, p_t])
@@ -206,14 +212,7 @@ a(t, (u,p), (δu,δp)) = ∫(
     δp * B * divergence(∂t(u)) 
 ) * dΩ
 
-# Linear form l(δu,δp) - represents external forces/sources
-
-n_Γ = get_normal_vector(Γ_wb)         # Unit normal getter :contentReference[oaicite:3]{index=3}
-l(t, (δu, δp)) = ∫( δu ⋅ ( - Pb * n_Γ ) ) * dΓ_wb  # Traction via normal :contentReference[oaicite:4]{index=4}
-
-
-# Residual form for the nonlinear solver
-res(t, (u,p), (δu,δp)) = a(t, (u,p), (δu,δp)) - l(t, (δu,δp))
+res(t, (u,p), (δu,δp)) = a(t, (u,p), (δu,δp))
 
 # ============================================================================
 # TRANSIENT PROBLEM SETUP
