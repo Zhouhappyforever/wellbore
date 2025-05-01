@@ -78,11 +78,9 @@ end
 
 # Load the Gmsh mesh from file
 # The mesh should be a square domain with properly tagged boundaries
-model = GmshDiscreteModel("square.msh")
+model = GmshDiscreteModel("wellbore.msh")
 
-# Define boundary tags for applying boundary conditions
-# These tags should match the physical groups defined in the Gmsh file
-dirichlet_tags = ["top", "bottom", "left", "right"]
+
 
 # Export the mesh for visualization
 writevtk(model, "model")  # Save model for visualization in ParaView
@@ -120,22 +118,19 @@ reffe_p = ReferenceFE(lagrangian, Float64, order_p)                 # Scalar-val
 # ============================================================================
 # BOUNDARY CONDITIONS
 # ============================================================================
-# Displacement: fix both uₓ and uᵧ on 'top_bottom'
-δu = TestFESpace(model, reffe_u; conformity=:H1,
-                 dirichlet_tags=["top", "bottom"])
-u_trial = TrialFESpace(δu, x -> VectorValue(0.0, 0.0))  # zero disp.
+# Displacement space with Dirichlet BC on bottom (fixed in y-direction)
+δu = TestFESpace(model, reffe_u, conformity=:H1, 
+                 dirichlet_tags=["top_bottom"])
+u = TrialFESpace(δu, x -> VectorValue(0.0, 0.0))  # Zero displacement at bottom boundary
 
-# Pressure: prescribe p = Pb on 'wellbore'
-δp = TestFESpace(model, reffe_p; conformity=:H1,
-                 dirichlet_tags=["left"])
-p_trial = TrialFESpace(δp, x -> Pb)  # constant pore‐pressure at wellbore
+# Pressure space with Dirichlet BC on left and right sides (drained boundaries)
+δp = TestFESpace(model, reffe_p, conformity=:H1, dirichlet_tags=["wellbore"])
+p = TrialFESpace(δp, 30.5e6)  # Zero pressure at left and right boundaries
 
 # Combined test space
 Y = MultiFieldFESpace([δu, δp])
 
-# Boundary measure for the wellbore (Neumann traction)
-Γ_wellbore = BoundaryTriangulation(model, tags="left")
-dΓ_wellbore = Measure(Γ_wellbore, degree)
+
 
 
 
