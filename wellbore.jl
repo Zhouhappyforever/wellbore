@@ -1,157 +1,146 @@
-#boundary Import necessary libraries
-using Gridap                # Main Gridap package for finite element analysis
-using Gridap.Geometry       # For mesh and geometry handling
-using Gridap.FESpaces       # For finite element spaces
-using Gridap.MultiField     # For coupled multi-physics problems
-using Gridap.Io             # For input/output operations
-using Gridap.Fields         # For field operations
-using Gridap.TensorValues   # For tensor operations
-using Gridap.ODEs           # For time-dependent problems
-using Gridap.CellData       # For cell data operations and projection
-using WriteVTK              # For VTK file output (visualization)
-using GridapGmsh            # For Gmsh mesh integration
+using Gridap
+using Gridap.Geometry
+using Gridap.FESpaces
+using Gridap.MultiField
+using Gridap.Io
+using Gridap.Fields
+using Gridap.TensorValues
+using Gridap.ODEs
+using Gridap.CellData
+using WriteVTK
+using GridapGmsh
 
-# ============================================================================
-# PROBLEM DESCRIPTION
-# ============================================================================
-# Plane strain poroelasticity: εzz = 0, σzz ≠ 0
+# -------------------------------------------------------------------
+# 1) PARAMETERS & MATERIAL PROPERTIES
+# -------------------------------------------------------------------
+E      = 20.0e6           # Young's modulus (Pa)
+nu     = 0.2              # Poisson's ratio
+B      = 0.8              # Biot coefficient
+M      = 1.0e9            # Biot modulus (Pa)
+k      = 1.0e-3           # Permeability (m^2)
+mu_f   = 1.0e-3           # Fluid viscosity (Pa·s)
 
-# ============================================================================
-# SIMULATION PARAMETERS
-# ============================================================================
-E         = 20.0e6     # Young's modulus (Pa)
-nu        = 0.2        # Poisson's ratio
-B         = 0.8        # Biot coefficient
-M         = 1.0e9      # Biot modulus (Pa)
-k         = 1.0e-3     # Permeability (m^2)
-mu_f      = 1.0e-3     # Fluid viscosity (Pa·s)
+Pb     = 31.5e6           # Wellbore pressure (Pa)
+p0     = 20.0e6           # Initial pore pressure (Pa)
 
-Pb        = 31.5e6     # Wellbore pressure (Pa)
-p0_val    = 20.0e6     # Initial pore pressure (Pa)
+T       = 0.0005          # Final time (s)
+num_steps = 100           # Number of time steps
+dt      = T / num_steps   # Time step size (s)
 
-T         = 0.0005     # Final time (s)
-num_steps = 100        # Number of time steps
-dt        = T / num_steps # Time step size (s)
+# Derived
+λ      = E * nu / ((1 + nu)*(1 - 2*nu))  # First Lamé parameter
+μ      = E / (2*(1 + nu))               # Shear modulus
+kμ     = k / mu_f                       # Hydraulic conductivity
 
-# ============================================================================
-# DERIVED MATERIAL PROPERTIES
-# ============================================================================
-lambda    = E * nu / ((1 + nu) * (1 - 2*nu))  # First Lamé parameter (Pa)
-mu_s      = E / (2*(1 + nu))                  # Shear modulus (Pa)
-k_mu      = k / mu_f                          # Hydraulic conductivity
-
-# ============================================================================
-# MESH & OUTPUT SETUP
-# ============================================================================
+# -------------------------------------------------------------------
+# 2) MESH & OUTPUT SETUP
+# -------------------------------------------------------------------
 output_dir = "results"
-if !isdir(output_dir)
-  mkdir(output_dir)
-end
+isdir(output_dir) || mkdir(output_dir)
 
-model      = GmshDiscreteModel("wellbore.msh")
-labels     = get_face_labeling(model)
+model  = GmshDiscreteModel("wellbore.msh")
+labels = get_face_labeling(model)
 println("Entities tagged as top_bottom: ", findall(labels.tag_to_name .== "top_bottom"))
 println("Entities tagged as wellbore:    ", findall(labels.tag_to_name .== "wellbore"))
 
-# ============================================================================
-# DOMAIN & INTEGRATION
-# ============================================================================
-Ω          = Triangulation(model)
-dΩ         = Measure(Ω,2)
-Γb         = BoundaryTriangulation(model)
-dΓb        = Measure(Γb,2)
+# -------------------------------------------------------------------
+# 3) DOMAIN & INTEGRATION
+# -------------------------------------------------------------------
+Ω   = Triangulation(model)
+dΩ  = Measure(Ω, 2)
 
-# ============================================================================
-# FINITE ELEMENT SPACES
-# ============================================================================
-order_u    = 2  # quadratic displacement
-order_p    = 1  # linear pressure
+Γb  = BoundaryTriangulation(model)
+dΓb = Measure(Γb, 2)
 
-reffe_u    = ReferenceFE(lagrangian, VectorValue{2,Float64}, order_u)
-reffe_p    = ReferenceFE(lagrangian, Float64, order_p)
+# -------------------------------------------------------------------
+# 4) FINITE ELEMENT SPACES & BCs
+# -------------------------------------------------------------------
+order_u, order_p = 2, 1
+reffe_u = ReferenceFE(lagrangian, VectorValue{2,Float64}, order_u)
+reffe_p = ReferenceFE(lagrangian, Float64, order_p)
 
-# Displacement BC: zero on top_bottom
-delta_u    = TestFESpace(model, reffe_u, conformity=:H1, dirichlet_tags=["top_bottom"])
-u_trial   = TrialFESpace(delta_u, x->VectorValue(0.0,0.0))
+# Displacement test/trial (u=0 on top_bottom)
+δu      = TestFESpace(model, reffe_u, conformity=:H1,
+                     dirichlet_tags=["top_bottom"])
+u_trial = TrialFESpace(δu, x -> VectorValue(0.0,0.0))
 
-# Pressure BC: Pb on wellbore
-delta_p    = TestFESpace(model, reffe_p, conformity=:H1, dirichlet_tags=["wellbore"])
-p_trial    = TrialFESpace(delta_p, x->Pb)
+# Pressure test/trial (p=Pb on wellbore)
+δp      = TestFESpace(model, reffe_p, conformity=:H1,
+                     dirichlet_tags=["wellbore"])
+p_trial = TrialFESpace(δp, x -> Pb)
 
-# Combined multi-field test space
-Y          = MultiFieldFESpace([delta_u, delta_p])
+# Combined *test* and *transient‐trial* spaces
+Y   = MultiFieldFESpace([δu, δp])
+u_t = TransientTrialFESpace(u_trial)
+p_t = TransientTrialFESpace(p_trial)
+X_t = MultiFieldFESpace([u_t, p_t])
 
-# ============================================================================
-# INITIAL & TRANSIENT SPACES
-# ============================================================================
-# Define initial condition fields
-u0         = VectorValue(0.0, 0.0)
-p0         = p0_val
+# -------------------------------------------------------------------
+# 5) INITIAL CONDITION
+# -------------------------------------------------------------------
+u0  = VectorValue(0.0,0.0)
+uh0 = interpolate_everywhere([u0, p0], X_t(0.0))
 
-# Transient trial spaces (Dirichlet enforced via trial spaces above)
-u_t       = TransientTrialFESpace(delta_u)
-p_t       = TransientTrialFESpace(delta_p)
-X_t        = MultiFieldFESpace([u_t, p_t])
-
-# Interpolate initial solution
-uh0 = interpolate_everywhere([u0, p0], X_t(0.0))  # corrected variable name for initial solution
-ih0 = interpolate_everywhere([u0, p0], X_t(0.0))
-
-# ============================================================================
-# CONSTITUTIVE RELATIONS
-# ============================================================================
-function sigma(u)
+# -------------------------------------------------------------------
+# 6) CONSTITUTIVE RELATIONS
+# -------------------------------------------------------------------
+function σ(u)
   ε = symmetric_gradient(u)
-  I = TensorValue(1.0, 0.0, 0.0, 1.0)
-  return lambda * tr(ε) * I + 2*mu_s * ε
+  I = TensorValue(1.0,0.0,0.0,1.0)
+  λ*tr(ε)*I + 2*μ*ε
 end
 
-function sigma_zz(u)
-  return lambda * tr(symmetric_gradient(u))
+# -------------------------------------------------------------------
+# 7) WEAK FORMS
+# -------------------------------------------------------------------
+a(t, up, tup) = begin
+  u,p   = up
+  δu,δp = tup
+  ∫(
+    symmetric_gradient(δu) ⊙ σ(u) -        # solid mechanics
+    B*divergence(δu)*p +                  # Biot coupling
+    δp*(1/M)*∂t(p) +                      # fluid storage
+    ∇(δp)⋅(kμ*∇(p)) +                     # Darcy flow
+    δp*B*divergence(∂t(u))               # coupling (fluid <- solid)
+  ) * dΩ
 end
 
-# ============================================================================
-# WEAK FORMULATION
-# ============================================================================
-a(t, (u,p), (δu,δp)) = ∫(
-  symmetric_gradient(δu) ⊙ sigma(u) -      # solid mechanics
-  B * divergence(δu) * p +                  # Biot coupling
-  δp * (1/M) * ∂t(p) +                      # storage term
-  ∇(δp) ⋅ (k_mu * ∇(p)) +                   # Darcy flow
-  δp * B * divergence(∂t(u))                # coupling term
-) * dΩ
+# RIGHT: use the constant zero‐vector so that δu⋅zero_vec is a proper vector‐valued integrand
+const zero_vec = VectorValue(0.0,0.0)
+l(t, (δu,δp)) = ∫( δu ⋅ zero_vec ) * dΓb
 
-l(t, (δu,δp)) = ∫(
-  δu ⋅ VectorValue(0.0,0.0)                  # zero Neumann on all boundaries
-) * dΓb
 
-res(t,(u,p),(δu,δp)) = a(t,(u,p),(δu,δp)) - l(t,(δu,δp))
 
-# ============================================================================
-# SOLVER SETUP
-# ============================================================================
+
+res(t, (u,p), (δu,δp)) = a(t,(u,p),(δu,δp)) - l(t,(δu,δp))
+
+
+
+# -------------------------------------------------------------------
+# 8) SOLVER SETUP & TIME MARCHING
+# -------------------------------------------------------------------
 op         = TransientFEOperator(res, X_t, Y)
 ls         = LUSolver()
 nls        = NLSolver(ls, method=:newton, iterations=10, show_trace=false)
-theta      = 1.0  # backward Euler
-ode_solver= ThetaMethod(nls, dt, theta)
+θ          = 1.0                        # backward Euler
+ode_solver = ThetaMethod(nls, dt, θ)
 
-# ============================================================================
-# TIME MARCHING & OUTPUT
-# ============================================================================
 sol = solve(ode_solver, op, 0.0, T, uh0)
-createpvd(joinpath(output_dir, "results")) do pvd
-  # initial state
-  disp0, pres0 = uh0
-  pvd[0.0] = createvtk(Ω, joinpath(output_dir, "results_0.vtu"),
-                       cellfields=["displacement"=>disp0, "pressure"=>pres0])
 
-  # subsequent time steps
-  for (i,(tn,uhn)) in enumerate(sol)
+# -------------------------------------------------------------------
+# 9) OUTPUT (ParaView .pvd + .vtu)
+# -------------------------------------------------------------------
+createpvd(joinpath(output_dir,"results")) do pvd
+  disp0, pres0 = uh0
+  pvd[0.0] = createvtk(Ω, joinpath(output_dir,"results_0.vtu"),
+                       cellfields=["displacement"=>disp0,
+                                   "pressure"   =>pres0])
+  for (tn, uhn) in sol
     println("Writing results at t = $tn")
-    disp_n,pres_n = uhn
-    pvd[tn] = createvtk(Ω, joinpath(output_dir, "results_$(i).vtu"),
-                         cellfields=["displacement"=>disp_n, "pressure"=>pres_n])
+    disp_n, pres_n = uhn
+    pvd[tn] = createvtk(Ω, joinpath(output_dir,"results_$(tn).vtu"),
+                        cellfields=["displacement"=>disp_n,
+                                    "pressure"   =>pres_n])
   end
 end
 
